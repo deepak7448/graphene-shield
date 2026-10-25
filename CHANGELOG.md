@@ -59,3 +59,4 @@ Performance:
 - Authentication is cached per request. A query with several guarded fields decodes the token, loads the user and runs `USER_VALIDATOR` once instead of once per field (5 fields: 5 user queries → 1). Rejections are cached too; errors that might be temporary are not.
 - The error envelope no longer re-parses successful responses, which are most responses.
 - Hardening: the PDF byte scan only treats `stream` as a stream when it follows a dictionary's `>>`. A name such as `/upstream` can no longer hide the dictionary after it.
+- Tested on Django 6.1 (Python 3.12+) as well as 4.2 and 5.2. CI now covers all three, and the classifiers list only those tested versions.

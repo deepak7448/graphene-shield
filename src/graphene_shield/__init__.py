@@ -5,4 +5,4 @@ BaseMutation``) so that importing the top-level package never touches Django
 settings or optional dependencies.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
