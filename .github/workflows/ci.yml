@@ -1,0 +1,123 @@
+name: CI
+
+# Publishing to PyPI lives in publish.yml (triggered by a GitHub release).
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch or pull request cancels the older run
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test (Python ${{ matrix.python-version }}, Django ${{ matrix.django }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        # The two supported Django LTS lines.
+        django: ["4.2", "5.2"]
+        exclude:
+          # Django 4.2 doesn't support Python 3.13.
+          - python-version: "3.13"
+            django: "4.2"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install libmagic (used by the python-magic extra)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libmagic1
+
+      - name: Install package, all extras and development dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[all]" --group dev "django==${{ matrix.django }}.*"
+
+      - name: Lint with ruff
+        run: |
+          ruff check .
+          ruff format --check .
+
+      - name: Run tests
+        run: |
+          pytest
+
+  core-install:
+    # The extras are optional: the package must import and build a schema without them.
+    name: Core install (no extras)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the package without extras
+        run: |
+          python -m pip install --upgrade pip
+          pip install .
+      - name: Import every module that has no optional dependency
+        run: |
+          python - <<'EOF'
+          import django
+          from django.conf import settings
+
+          settings.configure(
+              INSTALLED_APPS=["django.contrib.contenttypes", "django.contrib.auth", "graphene_django"],
+              GRAPHENE_SHIELD={"AUTHENTICATOR": "graphene_shield.authentication.session_authenticate"},
+          )
+          django.setup()
+
+          import graphene
+          from graphene import relay
+          from django.contrib.auth.models import Group
+          from graphene_shield import (
+              authentication, connections, files, filters, mutations, pagination, queries, views,
+          )
+
+          class GroupType(connections.CountableDjangoObjectType):
+              class Meta:
+                  model = Group
+                  interfaces = (relay.Node,)
+                  fields = ("id", "name")
+
+          class Query(graphene.ObjectType):
+              groups = queries.ModelListField(GroupType, filter_input=filters.BaseFilterInput)
+
+          graphene.Schema(query=Query)
+          assert files.pypdf is None, "pypdf should not be installed here"
+          print("Core install OK")
+          EOF
+
+  package:
+    name: Build and check package
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+          python -m twine check --strict dist/*
+      - name: Install the built wheel
+        run: |
+          pip install dist/*.whl
+          python -c "import graphene_shield; print(graphene_shield.__version__)"
