@@ -467,40 +467,6 @@ validate_file(upload, allowed_types={"PDF", "PNG"}, max_file_size=5 * 1024 * 102
 # defaults: files.DEFAULT_ALLOWED_TYPES ({"PDF"}) and files.DEFAULT_MAX_FILE_SIZE (10 MB)
 ```
 
-## Development
-
-```bash
-uv sync --all-extras
-uv run pytest
-uv run ruff check . && uv run ruff format --check .
-uv build                 # → dist/*.whl, dist/*.tar.gz
-uv run twine check --strict dist/*
-```
-
-### Continuous integration
-
-`.github/workflows/ci.yml` runs on every push and pull request to `master`:
-
-- **test**: ruff and the full test suite on Python 3.10–3.13 × Django 4.2 and 5.2, with all extras installed.
-- **core-install**: installs the package *without* extras and checks that every module still imports and a schema builds.
-- **package**: builds the sdist and wheel, runs `twine check --strict`, and installs the wheel.
-
-### Releasing
-
-Releases are published from GitHub by `.github/workflows/publish.yml`, using PyPI [Trusted Publishing](https://docs.pypi.org/trusted-publishers/). No API token is stored anywhere.
-
-One-time setup:
-
-1. On PyPI, open *Your projects → Publishing → Add a new pending publisher* and enter: project `graphene-shield`, your GitHub owner and repository, workflow `publish.yml`, environment `pypi`.
-2. Do the same on [TestPyPI](https://test.pypi.org) with environment `testpypi`.
-3. In the GitHub repository, create the environments `pypi` and `testpypi` (*Settings → Environments*). You can add required reviewers to `pypi` as a final check.
-
-Each release:
-
-1. Bump `__version__` in `src/graphene_shield/__init__.py` and add a section to `CHANGELOG.md`.
-2. Create a GitHub release with the tag `v<version>`, for example `v0.1.0`. The workflow refuses to publish if the tag doesn't match `__version__`.
-3. A normal release uploads to PyPI. A release marked **pre-release** uploads to TestPyPI, which is useful for a dry run first.
-
 ## License
 
 MIT
