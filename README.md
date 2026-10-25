@@ -479,7 +479,7 @@ uv run twine check --strict dist/*
 
 ### Continuous integration
 
-`.github/workflows/ci.yml` runs on every push and pull request to `main`:
+`.github/workflows/ci.yml` runs on every push and pull request to `master`:
 
 - **test**: ruff and the full test suite on Python 3.10–3.13 × Django 4.2 and 5.2, with all extras installed.
 - **core-install**: installs the package *without* extras and checks that every module still imports and a schema builds.
