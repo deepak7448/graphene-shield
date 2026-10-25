@@ -1,12 +1,130 @@
 # graphene-shield
 
-Ready-made building blocks for [Graphene-Django](https://github.com/graphql-python/graphene-django) APIs:
+[![PyPI](https://img.shields.io/pypi/v/graphene-shield.svg)](https://pypi.org/project/graphene-shield/)
+[![CI](https://img.shields.io/github/actions/workflow/status/deepak7448/graphene-shield/ci.yml?branch=master&label=CI)](https://github.com/deepak7448/graphene-shield/actions)
+[![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue)](https://pypi.org/project/graphene-shield/)
+[![Django](https://img.shields.io/badge/django-4.2%20%7C%205.2-0C4B33)](https://pypi.org/project/graphene-shield/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-- **`BaseMutation`** gives every mutation the same flow: sanitize input → `validate_input` → `perform_mutation`. Every mutation returns the same `response: [ResponseField]` list, and internal exception messages are never sent to clients.
-- **`ModelListField`** is a Relay connection with `filters`, `search`, `sortBy`, `offset`, `totalCount` and a page-size cap. Your resolver only has to return the base (permission-scoped) queryset.
-- **Content-based upload validation** detects file types from magic bytes and file structure. It covers PDF, images and Office files, and blocks PDFs that contain active content.
-- **Login checks** for resolvers and mutations. JWT is built in: `Bearer` or `JWT` prefixes, and each failure gets its own error code. Django sessions or your own scheme can be used instead.
-- **GraphQL views** that turn errors into a single, predictable JSON body. Multipart uploads are supported.
+**Stop rewriting the same GraphQL plumbing in every Django project.** graphene-shield
+adds the layer Graphene-Django leaves to you:
+
+- one response shape for every mutation;
+- filterable, sortable list fields with three pagination styles;
+- upload validation that looks at file content, not file names;
+- login checks that work with JWT, sessions or your own scheme;
+- error responses that never leak internals.
+
+Every part has a safe default.
+
+```text
+                          GraphQL request
+                                 │
+                                 ▼
+                 ┌───────────────────────────────┐
+                 │   GraphQLView (depth limit)   │
+                 └───────────────┬───────────────┘
+                                 │
+               ┌─────────────────┴─────────────────┐
+               ▼                                   ▼
+          BaseMutation                       ModelListField
+ login_required → sanitize input   filters → search → sort → paginate
+  → validate_input (+ uploads)     (offset │ keyset │ page, lazy COUNT)
+  → perform_mutation (atomic)                      │
+               │                                   │
+               └─────────────────┬─────────────────┘
+                                 ▼
+              data, or one JSON error body with a code
+```
+
+## Contents
+
+- [Installation](#installation)
+- [Quick start](#quick-start)
+- [Why use it?](#why-use-it)
+- [Use cases](#use-cases)
+- [How it works](#how-it-works)
+- [Configuration](#configuration)
+- [API reference](#api-reference)
+- [Limitations](#limitations)
+
+## Installation
+
+```bash
+pip install graphene-shield            # core
+pip install "graphene-shield[all]"     # every optional extra
+```
+
+| Extra | Adds |
+|---|---|
+| `optimizer` | `graphene-django-optimizer`: connection querysets are optimised automatically |
+| `upload` | `graphene-file-upload`: `FileUploadGraphQLView` |
+| `files` | `pypdf`: the PDF active-content check parses the file's real objects (recommended). `python-magic`: legacy-Office detection (needs the system `libmagic`) |
+| `jwt` | `PyJWT`: `graphene_shield.auth` |
+
+
+The core needs only Django, graphene, graphene-django and graphql-relay. Python 3.10–3.13 and Django 4.2 or 5.2 are tested.
+
+## Quick start
+
+```python
+# schema.py
+import graphene
+from graphene import relay
+from graphene_shield.connections import CountableDjangoObjectType
+from graphene_shield.mutations import BaseMutation
+from graphene_shield.queries import ModelListField
+
+from .models import Book
+
+
+class BookType(CountableDjangoObjectType):
+    class Meta:
+        model = Book
+        interfaces = (relay.Node,)
+        fields = ("id", "title", "author")
+
+
+class CreateBook(BaseMutation):
+    book = graphene.Field(BookType)
+
+    class Arguments:
+        title = graphene.String(required=True)
+
+    @classmethod
+    def perform_mutation(cls, root, info, title):
+        book = Book.objects.create(title=title)
+        return cls(book=book, response=[cls.success("Book created.", "BOOK_CREATED")])
+
+
+class Query(graphene.ObjectType):
+    book_lists = ModelListField(BookType, search_fields=["title", "author"])
+
+
+class Mutation(graphene.ObjectType):
+    create_book = CreateBook.Field()
+
+
+schema = graphene.Schema(query=Query, mutation=Mutation)
+```
+
+```python
+# urls.py
+from django.urls import path
+from graphene_shield.views import GraphQLView
+
+from .schema import schema
+
+urlpatterns = [path("graphql/", GraphQLView.as_view(schema=schema))]
+```
+
+```graphql
+mutation { createBook(title: "Dune") { book { title } response { message messageCode status } } }
+# → {"book": {"title": "Dune"}, "response": [{"message": "Book created.", "messageCode": "BOOK_CREATED", "status": true}]}
+
+{ bookLists(first: 10, search: "dune", sortBy: {field: CREATED_AT, direction: DESC}) {
+    totalCount  edges { node { id title } } } }
+```
 
 ## Why use it?
 
@@ -28,23 +146,9 @@ Every Graphene-Django project ends up solving the same problems by hand. This pa
 
 **Not a fit:** REST-only or Strawberry projects. Apps that rely on GraphQL's standard `errors` array (e.g. Apollo's default error handling) may prefer to keep it; the error envelope is optional (use your own view).
 
-## Install
+## Use cases
 
-```bash
-pip install graphene-shield            # core
-pip install "graphene-shield[all]"     # + optimizer, uploads, libmagic, PyJWT
-```
-
-| Extra | Adds |
-|---|---|
-| `optimizer` | `graphene-django-optimizer`: connection querysets are optimised automatically |
-| `upload` | `graphene-file-upload`: `FileUploadGraphQLView` |
-| `files` | `pypdf`: the PDF active-content check parses the file's real objects (recommended). `python-magic`: legacy-Office detection (needs the system `libmagic`) |
-| `jwt` | `PyJWT`: `graphene_shield.auth` |
-
-Requires Python ≥ 3.10, Django ≥ 4.2, graphene 3, graphene-django 3.
-
-## Mutations
+### 1. One response shape for every mutation
 
 ```python
 import graphene
@@ -88,11 +192,12 @@ mutation { createTask(title: "") { response { message messageCode status field }
 - A `GraphQLError` (including auth failures) propagates to the top-level `errors`.
 - Returning `None` from `perform_mutation` raises an error instead of failing silently.
 
-## List queries
+### 2. Filterable, searchable, sortable lists
 
 ```python
 import graphene
 from graphene import relay
+from graphene_shield.authentication import login_required
 from graphene_shield.connections import CountableDjangoObjectType
 from graphene_shield.filters import BaseFilterInput
 from graphene_shield.queries import ModelListField
@@ -131,7 +236,7 @@ class Query(graphene.ObjectType):
         max_limit=100,
     )
 
-    @jwt_required
+    @login_required
     def resolve_task_lists(root, info, **kwargs):
         # Only scope the base queryset; filters/search/sort/pagination are applied for you.
         return Task.objects.filter(school__members=info.context.user)
@@ -148,23 +253,11 @@ class Query(graphene.ObjectType):
 }
 ```
 
-### Models without `is_active` / `created_at` / `updated_at`
-
-`BaseFilterInput` assumes those columns. `id` always works, because it matches the primary key whatever its name or type. For the other three:
-
-| Situation | What to use |
-|---|---|
-| The model has none of these columns | `IdFilterInput`, which exposes only `id` |
-| The columns exist under other names | `common_field_map = {"is_active": "enabled", "created_at": "created"}` on your filter input |
-| A client filters on a column the model lacks | A `BAD_REQUEST` error (``Filter `isActive` is not supported for Tag.``), never unfiltered rows |
-
-The same goes for sorting. The default `SortingInput` offers `ID`, `CREATED_AT`, `UPDATED_AT` and `NAME`. For models without those fields, pass your own `make_sorting_input(...)`, or use `sort_input=None`. Sorting on a field the model lacks returns `INVALID_SORT_FIELD`.
-
-`FilterConnectionField` is the lower-level field without the filter, search and sort arguments. It still gives you the pagination modes below, `max_limit` (default `CONNECTION_MAX_LIMIT`), and `enforce_first_or_last`. Breaking a pagination limit returns a coded GraphQL error (`PAGINATION_LIMIT_EXCEEDED`, `PAGINATION_REQUIRED`...); it is not an assertion.
+`FilterConnectionField` is the lower-level field without the filter, search and sort arguments. It still gives you the pagination styles below, `max_limit` (default `CONNECTION_MAX_LIMIT`) and `enforce_first_or_last`. Breaking a pagination limit returns a coded GraphQL error (`PAGINATION_LIMIT_EXCEEDED`, `PAGINATION_REQUIRED`...); it is not an assertion.
 
 `QuerySetProcessor` and `resolve_model_list()` are also available if you want to filter, search and sort a queryset yourself.
 
-### Pagination
+### 3. Choosing a pagination style
 
 Choose the style globally with the `PAGINATION` setting, or per field with `pagination=...`:
 
@@ -206,7 +299,23 @@ Details:
   - `first` and `last` can't be combined.
 - **Page mode.** `pageSize` defaults to `DEFAULT_PAGE_SIZE` (20) and is capped by `max_limit`. The type is named `<Node>Page`, for example `AuditTypePage`.
 
-## File validation
+### 4. Models without `is_active` / `created_at` / `updated_at`
+
+`BaseFilterInput` assumes those columns. `id` always works, because it matches the primary key whatever its name or type. For the other three:
+
+| Situation | What to use |
+|---|---|
+| The model has none of these columns | `IdFilterInput`, which exposes only `id` |
+| The columns exist under other names | `common_field_map = {"is_active": "enabled", "created_at": "created"}` on your filter input |
+| A client filters on a column the model lacks | A `BAD_REQUEST` error (``Filter `isActive` is not supported for Tag.``), never unfiltered rows |
+
+The same goes for sorting. The default `SortingInput` offers `ID`, `CREATED_AT`, `UPDATED_AT` and `NAME`. For models without those fields, pass your own `make_sorting_input(...)`, or use `sort_input=None`. Sorting on a field the model lacks returns `INVALID_SORT_FIELD`.
+
+`FilterConnectionField` is the lower-level field without the filter, search and sort arguments. It still gives you the pagination modes below, `max_limit` (default `CONNECTION_MAX_LIMIT`), and `enforce_first_or_last`. Breaking a pagination limit returns a coded GraphQL error (`PAGINATION_LIMIT_EXCEEDED`, `PAGINATION_REQUIRED`...); it is not an assertion.
+
+`QuerySetProcessor` and `resolve_model_list()` are also available if you want to filter, search and sort a queryset yourself.
+
+### 5. Validating uploads
 
 ```python
 from graphene_shield.files import detect_file_type, validate_file
@@ -228,7 +337,7 @@ With `pypdf` installed (the `files` extra), the PDF check walks every object a P
 
 Not covered: macros in legacy `.doc`/`.xls`/`.ppt` files, and CSV formula injection (`=HYPERLINK(...)` cells). Handle those where the files are opened or exported.
 
-## Authentication
+### 6. Login with JWT, sessions or your own scheme
 
 `BaseMutation.login_required = True` and the `@login_required` resolver decorator call the function named by the `AUTHENTICATOR` setting. It returns the user, or raises `EnhancedGraphQLError` to reject the request. Pick one of these:
 
@@ -257,32 +366,7 @@ class UpdateProfile(BaseMutation):
 
 `@jwt_required` (from `graphene_shield.auth`) always uses JWT, whatever `AUTHENTICATOR` is set to.
 
-### Your own login rules: `USER_VALIDATOR`
-
-After any authenticator accepts the user, `USER_VALIDATOR(user, payload, request)` runs once. `payload` is the decoded JWT for the JWT authenticator and `None` for the others. Raise `EnhancedGraphQLError` to reject the request:
-
-```python
-def check_user(user, payload, request):
-    if not user.profile.email_verified:
-        raise EnhancedGraphQLError("Please verify your email first.",
-                                   message_code="EMAIL_NOT_VERIFIED", status=False)
-
-GRAPHENE_SHIELD = {"USER_VALIDATOR": "myapp.auth.check_user"}
-```
-
-Typical rules: email verified, account or organisation suspended, a password change logging out old tokens (`payload["iat"]` before `user.password_changed_at`), role changed since login. It runs on every authenticated request, so keep it cheap. Raise `EnhancedGraphQLError` rather than other exceptions, which are treated as server errors. A rejected user is never left on `request.user`.
-
-### Projects without authentication
-
-Authentication is opt-in. Without `login_required`, `@login_required` or `@jwt_required`, nothing is checked and PyJWT isn't needed. That also means **everything is public**:
-
-- `ModelListField` without a resolver returns every row of the model's default manager, including inactive or soft-deleted rows.
-- `node(id: ...)` returns any object by ID.
-- Every mutation can be called by anyone.
-
-If some data is private, scope it explicitly: return a filtered queryset from the list resolver, and override `get_queryset` on the type (it is also used by `node`). If authentication is misconfigured (e.g. `login_required = True` but PyJWT missing), requests are rejected and the cause is logged; nothing is let through.
-
-### JWT header formats
+JWT header formats:
 
 | Client sends | Accepted by default? | To change |
 |---|---|---|
@@ -298,7 +382,32 @@ The JWT authenticator verifies the token's signature, `exp`, algorithm and (opti
 
 Error codes: `PERMISSION_DENIED`, `INVALID_FORMAT`, `TOKEN_EXPIRED`, `TOKEN_REVOKED`, `WRONG_TOKEN_TYPE`, `INVALID_SIGNATURE`, `INVALID_ALGORITHM`, `INVALID_AUDIENCE`, `INVALID_ISSUER`, `TOKEN_INVALID`, `PAYLOAD_INVALID`, `USER_NOT_FOUND` and `USER_INACTIVE`.
 
-## Views
+### 7. Your own login rules
+
+After any authenticator accepts the user, `USER_VALIDATOR(user, payload, request)` runs once. `payload` is the decoded JWT for the JWT authenticator and `None` for the others. Raise `EnhancedGraphQLError` to reject the request:
+
+```python
+def check_user(user, payload, request):
+    if not user.profile.email_verified:
+        raise EnhancedGraphQLError("Please verify your email first.",
+                                   message_code="EMAIL_NOT_VERIFIED", status=False)
+
+GRAPHENE_SHIELD = {"USER_VALIDATOR": "myapp.auth.check_user"}
+```
+
+Typical rules: email verified, account or organisation suspended, a password change logging out old tokens (`payload["iat"]` before `user.password_changed_at`), role changed since login. It runs on every authenticated request, so keep it cheap. Raise `EnhancedGraphQLError` rather than other exceptions, which are treated as server errors. A rejected user is never left on `request.user`.
+
+### 8. Public APIs without authentication
+
+Authentication is opt-in. Without `login_required`, `@login_required` or `@jwt_required`, nothing is checked and PyJWT isn't needed. That also means **everything is public**:
+
+- `ModelListField` without a resolver returns every row of the model's default manager, including inactive or soft-deleted rows.
+- `node(id: ...)` returns any object by ID.
+- Every mutation can be called by anyone.
+
+If some data is private, scope it explicitly: return a filtered queryset from the list resolver, and override `get_queryset` on the type (it is also used by `node`). If authentication is misconfigured (e.g. `login_required = True` but PyJWT missing), requests are rejected and the cause is logged; nothing is let through.
+
+### 9. A predictable error body and query limits
 
 ```python
 # urls.py
@@ -318,6 +427,30 @@ Successful responses are left unchanged. When there are errors, the body becomes
 Unexpected resolver exceptions are logged, and their messages are masked unless `EXPOSE_EXCEPTION_MESSAGES` is on.
 
 Operations nested deeper than `MAX_QUERY_DEPTH` (default 15; introspection is exempt) are rejected before they run. The depth limit doesn't stop wide queries that repeat a field under many aliases; use rate limiting or query-cost analysis for that.
+
+## How it works
+
+- **Mutation lifecycle.** `BaseMutation.mutate` does these steps in order:
+  1. Authenticates, if `login_required` is set.
+  2. Strips string inputs, skipping password/secret/token keys.
+  3. Runs `validate_input`.
+  4. Runs `perform_mutation` inside `transaction.atomic()`.
+
+  A `GraphQLError` passes straight through to the top-level `errors`. Any other exception is logged, rolled back and returned as `UNEXPECTED_ERROR`.
+- **Lists.** The resolver returns a base queryset (or nothing, meaning the default manager). Then the type's `get_queryset` runs, followed by the optional query optimizer, then filters → search (`icontains` ORed across `search_fields`) → sort → pagination.
+- **Pagination SQL.**
+  - `offset` and `page` use `LIMIT/OFFSET`.
+  - `keyset` adds a `WHERE (a > x) OR (a = x AND b > y) …` condition built from the ordering, with the primary key always last.
+  - Every style fetches one extra row to answer `hasNextPage`, so `COUNT(*)` only runs for `totalCount`/`totalPages`.
+  - Keyset cursors are base64 JSON holding the sort order and the row's values, at full datetime precision. They are checked on every use.
+- **File types.** Types are decided from magic bytes and container structure: PDF structure markers, the OOXML parts inside a zip, OLE headers. libmagic is only consulted when that can't decide.
+- **PDF active content.** Two layers check every upload:
+  - With `pypdf`, every object reachable from the trailer is walked, including compressed object streams.
+  - A byte scan checks the text outside stream bodies, after decoding `#xx` name escapes, and inflates object streams within a 64 MB budget.
+
+  Anything that can't be inspected is rejected.
+- **Authentication.** `authenticate()` runs the configured authenticator, then `USER_VALIDATOR`, and remembers the outcome on the request. Every guarded field after the first costs nothing. A rejection restores the previous `request.user`.
+- **Errors.** The views check every response for an error key. Responses without errors are passed through unchanged. Responses with errors are re-encoded as one `ResponseField`-shaped body; exceptions that escaped a resolver are logged, and their messages masked.
 
 ## Configuration
 
@@ -424,7 +557,7 @@ GRAPHENE_SHIELD = {
 
 | Setting | Default | What it does | Change it when |
 |---|---|---|---|
-| `PAGINATION` | `"offset"` | Default style for `ModelListField`/`FilterConnectionField`: `"offset"`, `"keyset"` or `"page"` (see [Pagination](#pagination)). A field's `pagination=` argument overrides it. | You want keyset or page numbers everywhere |
+| `PAGINATION` | `"offset"` | Default style for `ModelListField`/`FilterConnectionField`: `"offset"`, `"keyset"` or `"page"` (see [Choosing a pagination style](#3-choosing-a-pagination-style)). A field's `pagination=` argument overrides it. | You want keyset or page numbers everywhere |
 | `CONNECTION_MAX_LIMIT` | `1000` | Largest `first`/`last`/`pageSize` a client may request, and the page size of a connection when the client gives none. A field's `max_limit=` overrides it. `None` removes the cap; don't do that on a public API. | Lower it for mobile/public APIs |
 | `DEFAULT_PAGE_SIZE` | `20` | `pageSize` when a `"page"` field is called without one (never above `max_limit`). | Your UI shows a different number of rows |
 
@@ -467,6 +600,84 @@ validate_file(upload, allowed_types={"PDF", "PNG"}, max_file_size=5 * 1024 * 102
 # defaults: files.DEFAULT_ALLOWED_TYPES ({"PDF"}) and files.DEFAULT_MAX_FILE_SIZE (10 MB)
 ```
 
+## API reference
+
+### Mutations: `graphene_shield.mutations`
+
+`BaseMutation`. Subclass it and add `class Arguments` and output fields as usual. Every subclass gets a `response: [ResponseField]` field.
+
+| Member | Description |
+|---|---|
+| `login_required = False` | Authenticate with `AUTHENTICATOR` before anything else runs. |
+| `atomic = True` | Run `perform_mutation` in `transaction.atomic()`. |
+| `validate_input(info, data)` | Return a `ResponseField` or a list of them to stop with errors; `None`/`[]` to continue. |
+| `perform_mutation(root, info, **data)` | Your logic. Must return `cls(...)`. |
+| `success(message, message_code="SUCCESS", data=None)` | Successful `ResponseField`. |
+| `failure(error, field=None, data=None)` | Failed `ResponseField` from a string or any object with `.message`/`.code`. |
+| `add_field_error(field_name, error, index=None)` | Field-scoped failure; `index` adds "at N" for list inputs. |
+| `add_response(message, message_code, status, field, data, errors)` | Low-level builder. |
+| `_validate_required_fields(data, field_map, errors, prefix="")` | Append an error for each empty field (`None`, blank, empty list/dict). |
+| `_validate_file(file, field_name, errors, idx=None, allowed_types=None, max_file_size=None, ...)` | `validate_file` that appends a field error. |
+| `handle_exception(exc)` | Override to change how unexpected exceptions become responses. |
+
+### Lists: `graphene_shield.queries`, `.connections`, `.filters`, `.sorting`
+
+| Name | Description |
+|---|---|
+| `ModelListField(node_type, filter_input=None, search_fields=(), sort_input=SortingInput, distinct=False, pagination=None, max_limit=..., on=None, enforce_first_or_last=False)` | List field that applies filters, search, sort and pagination. |
+| `FilterConnectionField(node_type, pagination=None, max_limit=..., on=None, enforce_first_or_last=False)` | The same, without filters, search and sort. |
+| `CountableDjangoObjectType` | `DjangoObjectType` with a `totalCount` connection and a `number` (primary key) field. |
+| `IdFilterInput`, `BaseFilterInput` | Filter inputs. Subclass them and override `filter_queryset(queryset, filters)`; `common_field_map` renames columns. |
+| `make_sort_field_enum(name, {"KEY": ["field", "pk"]})` | Sort-field enum; every listed field is used in order. |
+| `make_sorting_input(name, enum)`, `SortingInput`, `OrderDirection` | Sort input types. `SortingInput` offers `ID`, `CREATED_AT`, `UPDATED_AT`, `NAME`. |
+| `resolve_model_list(queryset, *, filter_input, filters, search, search_fields, sort_by, distinct)` | Filter, search and sort a queryset yourself. |
+
+### Files: `graphene_shield.files`
+
+| Name | Description |
+|---|---|
+| `validate_file(file, allowed_types=None, max_file_size=None, check_file_size=True, validate_content=True, error_messages=None)` | Returns the failing error message, or `None` if valid. |
+| `detect_file_type(file)` | `("PDF", "application/pdf")`, or `(None, mime)` when unknown or inconsistent. |
+| `contains_pdf_active_content(file)` | `True` for active content, or for files that can't be inspected. |
+| `DEFAULT_MAX_FILE_SIZE`, `DEFAULT_ALLOWED_TYPES` | 10 MB and `{"PDF"}`. |
+| `MAX_PDF_INFLATED_BYTES`, `MAX_PDF_OBJECTS` | Safety limits for the PDF check: 64 MB inflated, 500,000 objects. |
+
+### Authentication: `graphene_shield.authentication`, `graphene_shield.auth`
+
+| Name | Description |
+|---|---|
+| `authentication.login_required` | Resolver decorator using `AUTHENTICATOR`. |
+| `authentication.authenticate(request, authenticator=None)` | Authenticate, run `USER_VALIDATOR`, set `request.user`; cached per request. |
+| `authentication.session_authenticate(request)` | Authenticator for Django sessions or any middleware that sets `request.user`. |
+| `auth.jwt_required` | Resolver decorator that always uses JWT (`jwt` extra). |
+| `auth.authenticate_request(request)` | The default JWT authenticator. |
+| `auth.decode_token(token)`, `auth.get_token_from_request(request)` | Lower-level JWT helpers raising coded errors. |
+
+### Views, responses and helpers
+
+| Name | Description |
+|---|---|
+| `views.GraphQLView`, `views.FileUploadGraphQLView` | Views with the error envelope and depth limit; the second one handles multipart uploads (`upload` extra). |
+| `responses.ResponseField` | `message`, `messageCode`, `status`, `field`, `data`, `errors`. |
+| `responses.EnhancedGraphQLError(message, message_code=None, status=None, data=None)` | A `GraphQLError` carrying a code; `.from_message(error)` builds one from an `ErrorMessage`. |
+| `messages.ErrorMessage(message, code)` | Error definition. The defaults are in `CommonErrorMessages`, `FileErrorMessages`, `AuthErrorMessages` and `JwtErrorMessages`. |
+| `utils.resolve_global_id(global_id, expected_type=None)` | Decode a Relay ID, raising `ValueError` if it is invalid. |
+| `utils.sanitize_input(value, *, unescape_html=False)`, `utils.is_effectively_empty(value)` | The input helpers `BaseMutation` uses. |
+
+The package logs through the standard `logging` module under the `graphene_shield.mutations`, `graphene_shield.views`, `graphene_shield.queries` and `graphene_shield.files` loggers.
+
+## Limitations
+
+- **Graphene-Django only.** It isn't for Strawberry, Ariadne or REST APIs.
+- **N+1 queries.** Prevention is limited to the optional `graphene-django-optimizer`. Use `select_related`/`prefetch_related` in your resolvers or `get_queryset`.
+- **The error envelope** returns one error body and drops partial `data`. Use graphene-django's own view if your clients rely on GraphQL's standard `errors` array.
+- **Query limits.** Only depth is limited. There are no alias, batch or query-cost limits; use rate limiting for those.
+- **Keyset pagination** can't jump to a page, needs non-null sort fields and plain field-name ordering, and can't combine `first` with `last`.
+- **Upload checks.** Without `pypdf`, the PDF check is a heuristic. Macros in legacy `.doc`/`.xls`/`.ppt` files and CSV formula injection are not detected.
+- **Permissions.** There are no field-level permissions: scope data in list resolvers and in `get_queryset` (which `node(id:)` also uses).
+- **Async and subscriptions.** Neither async resolvers nor subscriptions are supported.
+- **Versions.** Python 3.10–3.13 and Django 4.2/5.2 are tested. The test suite also passes on Django 6.1, but graphene-django hasn't committed to supporting Django 6.
+
 ## License
 
-MIT
+MIT. See [LICENSE](LICENSE).
