@@ -224,6 +224,77 @@ class Query(graphene.ObjectType):
 - **Models without audit columns.** For models without `is_active`/`created_at`/`updated_at`, use `IdFilterInput`, or rename columns with `common_field_map = {"is_active": "enabled"}`.
 - **Unsupported filters or sorts** return `BAD_REQUEST` or `INVALID_SORT_FIELD`; rows are never silently left unfiltered.
 
+### Batch-loading what the client selected
+
+Give the node type a `prefetch_for_selection` classmethod and every list field over it
+calls it with the fields the client selected on each row. Only prefetch what was asked for:
+
+```python
+from django.db.models import Prefetch
+
+
+class TaskType(CountableDjangoObjectType):
+    comment_count = graphene.Int()
+
+    class Meta:
+        model = Task
+        interfaces = (relay.Node,)
+        fields = ("id", "title")
+
+    @classmethod
+    def prefetch_for_selection(cls, queryset, node_fields, info):
+        if "commentCount" in node_fields:
+            queryset = queryset.prefetch_related(
+                Prefetch("comments", to_attr="prefetched_comments")
+            )
+        return queryset
+
+    def resolve_comment_count(self, info):
+        if hasattr(self, "prefetched_comments"):
+            return len(self.prefetched_comments)
+        return self.comments.count()  # detail queries and other callers
+```
+
+- The prefetch runs once per page, for the rows on that page only (not the extra row fetched to learn `hasNextPage`).
+- It is skipped for `.union()` querysets, which Django can't prefetch.
+- `graphene_shield.selection` has the helpers it is built on (`collect_selected_fields`,
+  `connection_node_selection`, `nested_node_fields`) for use in your own resolvers.
+- `graphene_shield.relations.NonCascadingGenericRelation` adds a prefetchable generic relation
+  to a model without making deletes cascade to the generic children.
+
+**Foreign keys and one-to-ones.** If the target's type overrides `get_queryset` (and every
+`CountableDjangoObjectType` does when the `optimizer` extra is installed), graphene-django
+loads each foreign key with one query per row and ignores `select_related`.
+`graphene_shield.prefetch` loads them once per page instead, with identical results
+(rows hidden by `get_queryset` still resolve to `null`):
+
+```python
+from graphene_shield.prefetch import SelectionPrefetcher, nested, related, relation_resolver
+
+
+class ArticleType(CountableDjangoObjectType):
+    class Meta:
+        model = Article
+        interfaces = (relay.Node,)
+        fields = ("id", "title", "author", "stats")
+
+    # Prefetch only the relations the client selected.
+    prefetch_for_selection = SelectionPrefetcher(
+        Article, {"author": related("author"), "stats": related("stats")}
+    )
+    resolve_author = relation_resolver("author")  # reads the prefetch, else falls back
+    resolve_stats = relation_resolver("stats")    # reverse one-to-one works too
+
+
+class CommentType(CountableDjangoObjectType):
+    ...
+    # comment -> article -> whatever ArticleType needs for the fields selected under it
+    prefetch_for_selection = SelectionPrefetcher(
+        Comment, {"article": nested("article", ArticleType.prefetch_for_selection)}
+    )
+    resolve_article = relation_resolver("article")
+```
+
 ## Pagination
 
 Pick a style for every list with the `PAGINATION` setting, or per field with `pagination="..."`:
@@ -242,7 +313,9 @@ Pick a style for every list with the `PAGINATION` setting, or per field with `pa
     pageInfo { page totalPages totalCount hasNextPage } } }
 ```
 
-In every style, `COUNT(*)` only runs when the client asks for `totalCount` or `totalPages`.
+In every style, `COUNT(*)` only runs when the client asks for `totalCount` or `totalPages`,
+and a request that only asks for counts (no `edges`, `pageInfo`, `items` or `hasNextPage`)
+doesn't fetch any rows.
 
 ## File validation
 

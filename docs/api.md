@@ -29,6 +29,28 @@
 | `make_sort_field_enum(name, {"KEY": ["field", "pk"]})` | Sort-field enum; every listed field is used in order. |
 | `make_sorting_input(name, enum)`, `SortingInput`, `OrderDirection` | Sort input types. `SortingInput` offers `ID`, `CREATED_AT`, `UPDATED_AT`, `NAME`. |
 | `resolve_model_list(queryset, *, filter_input, filters, search, search_fields, sort_by, distinct)` | Filter, search and sort a queryset yourself. |
+| `NodeType.prefetch_for_selection(queryset, node_fields, info)` | Optional classmethod on the node type. Called once per page with the row fields the client selected (`{name: [sub-selections]}`); return the queryset with `prefetch_related(...)` added. Not called when no row fields are selected or for combined (`.union()`) querysets. |
+
+## Selections and relations: `graphene_shield.selection`, `graphene_shield.relations`
+
+| Name | Description |
+|---|---|
+| `selection.collect_selected_fields(info, selection_sets)` | `{field name: [sub-selection sets]}` for the given selection sets. Expands fragments, honours `@skip`/`@include`, ignores aliases. |
+| `selection.connection_node_selection(info)` | `(connection_fields, node_fields)` for the list field being resolved; `node_fields` come from `edges { node }` or `items`. |
+| `selection.nested_node_fields(info, selection_sets)` | Row fields of a nested connection, given that field's sub-selections (e.g. `node_fields["reviews"]`). |
+| `relations.NonCascadingGenericRelation` | `GenericRelation` for querying and prefetching only: deleting the parent leaves the generic children alone. No column, no migration. Needs `django.contrib.contenttypes`. |
+
+## Relation prefetching: `graphene_shield.prefetch`
+
+| Name | Description |
+|---|---|
+| `relation_prefetch(model, field_name, info, *, through=None, to_attr=None)` | `Prefetch` of a foreign key or one-to-one (either side). Goes through the target type's `get_queryset` over `Model.objects` when the type overrides it (as `get_node` does), else the base manager (as attribute access does). Stored in `prefetched_<field_name>` by default. `through` prefixes the lookup path. Raises `ValueError` for to-many relations. |
+| `relation_resolver(field_name, *, to_attr=None)` | Resolver reading that prefetch; without it, does exactly what graphene-django's resolver does. Assign in the type body: `resolve_author = relation_resolver("author")`. |
+| `SelectionPrefetcher(model, {graphql_field: builder})` | Prefetches chosen by the selected row fields, in mapping order. Builders: lookup string, `Prefetch`, `related(...)`, `nested(...)`, callable `(selection, info) -> lookups`, or a list of these. Callable as `(queryset, node_fields, info)`, so assign it as `prefetch_for_selection`. `.prefetches(node_fields, info)` returns the lookups. |
+| `related(field_name, *, to_attr=None)` | Builder: `relation_prefetch` of the prefetcher's model. |
+| `nested(relation, prefetcher, *, connection=False)` | Builder: follow `relation`, then run `prefetcher` for the fields selected beneath it. A to-one relation is loaded with `relation_prefetch` (resolve it with `relation_resolver`) and inner lookups run through its `to_attr`; a to-many relation is a plain lookup. `connection=True` reads row fields from `edges { node }`. |
+| `under_path(prefix, lookup)` | The same lookup one relation deeper; a `Prefetch` keeps its queryset and `to_attr`. |
+| `registered_type(model)` | The type in graphene-django's global registry for `model`. |
 
 ## Files: `graphene_shield.files`
 

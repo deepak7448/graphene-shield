@@ -92,7 +92,8 @@ jobs:
           from graphene import relay
           from django.contrib.auth.models import Group
           from graphene_shield import (
-              authentication, connections, files, filters, mutations, pagination, queries, views,
+              authentication, connections, files, filters, mutations, pagination, queries,
+              prefetch, relations, selection, views,
           )
 
           class GroupType(connections.CountableDjangoObjectType):

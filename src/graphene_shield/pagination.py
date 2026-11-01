@@ -27,7 +27,7 @@ from typing import Any
 
 import graphene
 from django.core.exceptions import FieldError, ImproperlyConfigured, ValidationError
-from django.db.models import F, Q
+from django.db.models import F, Q, prefetch_related_objects
 from django.db.models.query import QuerySet
 from graphene.relay.connection import connection_adapter, page_info_adapter
 from graphql_relay import get_offset_with_default, offset_to_cursor
@@ -58,6 +58,21 @@ def _count(iterable) -> int:
     return iterable.count() if isinstance(iterable, QuerySet) else len(iterable)
 
 
+def fetch_rows(iterable, start: int, stop: int | None, keep: int | None) -> list:
+    """``list(iterable[start:stop])``, prefetching related objects for the first ``keep`` rows only.
+
+    Pagination fetches one row past the page to learn ``hasNextPage``; running the
+    queryset's ``prefetch_related`` lookups for that row would load data that is
+    thrown away.
+    """
+    if not isinstance(iterable, QuerySet) or not iterable._prefetch_related_lookups:
+        return list(iterable[start:stop])
+    lookups = iterable._prefetch_related_lookups
+    rows = list(iterable.prefetch_related(None)[start:stop])
+    prefetch_related_objects(rows[:keep], *lookups)
+    return rows
+
+
 def _finish(connection, edges, has_previous, has_next, iterable, length=None):
     page_info = page_info_adapter(
         edges[0].cursor if edges else None,
@@ -77,13 +92,18 @@ def _finish(connection, edges, has_previous, has_next, iterable, length=None):
 def offset_forward_connection(connection, iterable, after, first):
     """``first``/``after`` page without a COUNT query (fetches one extra row instead)."""
     start = get_offset_with_default(after, -1) + 1
-    rows = list(iterable[start : start + first + 1])
+    rows = fetch_rows(iterable, start, start + first + 1, keep=first)
     has_next = len(rows) > first
     edges = [
         connection.Edge(node=node, cursor=offset_to_cursor(start + i))
         for i, node in enumerate(rows[:first])
     ]
     return _finish(connection, edges, start > 0, has_next, iterable)
+
+
+def empty_connection(connection, iterable):
+    """A connection with no edges, for selections that read no rows (only ``totalCount``)."""
+    return _finish(connection, [], False, False, iterable)
 
 
 # ── keyset ──
@@ -159,22 +179,32 @@ def _seek(ordering, values, forward: bool) -> Q:
     return condition
 
 
-def keyset_connection(connection, queryset, args, default_size):
+def check_keyset_arguments(queryset, args):
+    """Validate keyset arguments without querying: ``(ordering, cursor, cursor values)``.
+
+    Raises the same coded errors as ``keyset_connection``, so a request that
+    selects only ``totalCount`` is rejected exactly like one that fetches rows.
+    """
     first, last = args.get("first"), args.get("last")
     if first is not None and last is not None:
         raise bad_request("use either `first` or `last` with keyset pagination, not both.")
     if not isinstance(queryset, QuerySet):
         raise ImproperlyConfigured("Keyset pagination needs the resolver to return a QuerySet.")
-
     ordering = get_ordering(queryset)
+    cursor = args.get("before") if last is not None else args.get("after")
+    values = decode_keyset_cursor(cursor, ordering) if cursor else None
+    return ordering, cursor, values
+
+
+def keyset_connection(connection, queryset, args, default_size):
+    ordering, cursor, values = check_keyset_arguments(queryset, args)
+    first, last = args.get("first"), args.get("last")
     keys = {f"_shield_key_{i}": F(name) for i, (name, _) in enumerate(ordering)}
     backward = last is not None
     size = last if backward else (first if first is not None else default_size)
-    cursor = args.get("before") if backward else args.get("after")
 
     qs = queryset.annotate(**keys)
     if cursor:
-        values = decode_keyset_cursor(cursor, ordering)
         try:
             qs = qs.filter(_seek(ordering, values, forward=not backward))
         except (ValueError, TypeError, ValidationError, FieldError):
@@ -182,7 +212,7 @@ def keyset_connection(connection, queryset, args, default_size):
     # Walk backwards by flipping every direction, then restore the order.
     qs = qs.order_by(*(("-" if desc != backward else "") + name for name, desc in ordering))
 
-    rows = list(qs[: size + 1]) if size is not None else list(qs)
+    rows = fetch_rows(qs, 0, size + 1 if size is not None else None, keep=size)
     more = size is not None and len(rows) > size
     rows = rows[:size] if size is not None else rows
     if backward:
@@ -264,8 +294,12 @@ def page_type_for(node_type) -> type:
     return _page_types[node_type]
 
 
-def page_result(iterable, page: int, page_size: int) -> PageResult:
+def page_result(iterable, page: int, page_size: int, with_rows: bool = True) -> PageResult:
+    """One page of rows. With ``with_rows=False`` no row query runs: ``items`` is
+    empty and ``hasNextPage`` is unknown, for selections that read neither."""
+    if not with_rows:
+        return PageResult([], PageState(iterable, page, page_size, None))
     start = (page - 1) * page_size
-    rows = list(iterable[start : start + page_size + 1])
+    rows = fetch_rows(iterable, start, start + page_size + 1, keep=page_size)
     has_next = len(rows) > page_size
     return PageResult(rows[:page_size], PageState(iterable, page, page_size, has_next))

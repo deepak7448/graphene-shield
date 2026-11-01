@@ -7,12 +7,14 @@
   4. Runs `perform_mutation` inside `transaction.atomic()`.
 
   A `GraphQLError` passes straight through to the top-level `errors`. Any other exception is logged, rolled back and returned as `UNEXPECTED_ERROR`.
-- **Lists.** The resolver returns a base queryset (or nothing, meaning the default manager). Then the type's `get_queryset` runs, followed by the optional query optimizer, then filters → search (`icontains` ORed across `search_fields`) → sort → pagination.
+- **Lists.** The resolver returns a base queryset (or nothing, meaning the default manager). Then the type's `get_queryset` runs, followed by the optional query optimizer, then filters → search (`icontains` ORed across `search_fields`) → sort → `prefetch_for_selection` → pagination.
+- **Selection-driven work.** Before paginating, the field reads the client's selection (`graphene_shield.selection`). If no row is read (only `totalCount`, or in page mode no `items`/`hasNextPage`), no row query runs; keyset arguments are still validated. Otherwise the node type's `prefetch_for_selection` hook, if any, adds prefetches for the selected row fields. Rows are fetched without their prefetches and `prefetch_related_objects` then runs on the page's rows only, so the extra row fetched for `hasNextPage` loads nothing more.
 - **Pagination SQL.**
   - `offset` and `page` use `LIMIT/OFFSET`.
   - `keyset` adds a `WHERE (a > x) OR (a = x AND b > y) …` condition built from the ordering, with the primary key always last.
   - Every style fetches one extra row to answer `hasNextPage`, so `COUNT(*)` only runs for `totalCount`/`totalPages`.
   - Keyset cursors are base64 JSON holding the sort order and the row's values, at full datetime precision. They are checked on every use.
+- **Relation prefetching.** graphene-django resolves a foreign key or one-to-one field with plain attribute access when the target type keeps the default `get_queryset`, and otherwise with a query per row (`get_node`, or a `get_queryset(...).get()` for a reverse one-to-one). `graphene_shield.prefetch` mirrors that rule: `relation_prefetch` loads the page's targets in one query through the same queryset (`Model.objects` + `get_queryset`, or the base manager), and `relation_resolver` reads it, falling back to the exact per-row lookup. Rows hidden by `get_queryset` resolve to `null` either way, so a non-null field produces the same "Cannot return null" error.
 - **File types.** Types are decided from magic bytes and container structure: PDF structure markers, the OOXML parts inside a zip, OLE headers. libmagic is only consulted when that can't decide.
 - **PDF active content.** Two layers check every upload:
   - With `pypdf`, every object reachable from the trailer is walked, including compressed object streams.

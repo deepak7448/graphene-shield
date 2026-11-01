@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.0 — 2026-11-01
+
+Ported from the ONGC backend's listing optimisations:
+
+- **`prefetch_for_selection` hook.** List fields call `NodeType.prefetch_for_selection(queryset, node_fields, info)` with the row fields the client selected, in all three pagination modes, so a type can batch-load just those relations. Skipped for `.union()` querysets.
+- **Prefetches run for the page's rows only.** Any `prefetch_related` on a list queryset (from the hook or a resolver) no longer loads related rows for the extra row fetched to learn `hasNextPage`.
+- **Count-only requests fetch no rows.** Selecting only `totalCount` (or, in page mode, `pageInfo` without `hasNextPage`) runs just the `COUNT(*)`.
+- New `graphene_shield.selection` module: `collect_selected_fields`, `connection_node_selection`, `nested_node_fields`. Unlike the ONGC original, `@skip`/`@include` are honoured.
+- New `graphene_shield.prefetch` module: `relation_prefetch` / `relation_resolver` remove the per-row `get_node` query graphene-django runs for foreign keys and one-to-ones whose type overrides `get_queryset` (including every `CountableDjangoObjectType` when the optimizer is installed), with identical results. `SelectionPrefetcher` with `related` / `nested` builders chooses prefetches from the selected fields. Unlike the ONGC original it uses only graphene-django's public API, covers reverse one-to-ones, and has no project-specific access checks.
+- New `graphene_shield.relations.NonCascadingGenericRelation`: a `GenericRelation` for querying and prefetching whose parent's deletion doesn't cascade to the generic children.
+
+Changed:
+
+- `FilterConnectionField.paginate()` takes a new `info` argument (`paginate(connection, args, iterable, info=None)`). Subclasses overriding it must accept it.
+
+## 0.1.1
+
+Documentation only: README rewritten with usage examples, plus an API reference (`docs/api.md`), architecture notes (`docs/architecture.md`) and a configuration reference (`docs/configuration.md`).
+
 ## 0.1.0 — 2026-10-24
 
 First release, extracted from the GCC backend's `core/base_configure` layer.

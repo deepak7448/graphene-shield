@@ -1,4 +1,5 @@
 import graphene
+from django.db.models import Prefetch
 from graphene import relay
 from graphql import GraphQLError
 
@@ -10,7 +11,7 @@ from graphene_shield.messages import ErrorMessage
 from graphene_shield.mutations import BaseMutation
 from graphene_shield.queries import ModelListField
 from graphene_shield.sorting import make_sort_field_enum, make_sorting_input
-from tests.testapp.models import Book, LegacyItem, Tag
+from tests.testapp.models import Book, LegacyItem, Review, Tag
 
 NAME_REQUIRED = ErrorMessage("Name is required.", "NAME_REQUIRED")
 
@@ -34,6 +35,35 @@ class LegacyItemType(CountableDjangoObjectType):
         model = LegacyItem
         interfaces = (relay.Node,)
         fields = ("id", "title")
+
+
+class ReviewedBookType(CountableDjangoObjectType):
+    """Book type using the `prefetch_for_selection` hook for `reviewTexts`."""
+
+    review_texts = graphene.List(graphene.String)
+
+    class Meta:
+        model = Book
+        interfaces = (relay.Node,)
+        fields = ("id", "name")
+        skip_registry = True
+
+    @classmethod
+    def prefetch_for_selection(cls, queryset, node_fields, info):
+        if "reviewTexts" in node_fields:
+            reviews = Review.objects.order_by("pk")
+            queryset = queryset.prefetch_related(
+                Prefetch("reviews", queryset=reviews, to_attr="prefetched_reviews")
+            )
+        return queryset
+
+    @staticmethod
+    def resolve_review_texts(root, info):
+        if hasattr(root, "prefetched_reviews"):
+            reviews = root.prefetched_reviews
+        else:  # one query per row: what the hook avoids
+            reviews = root.reviews.order_by("pk")
+        return [review.text for review in reviews]
 
 
 class LegacyItemFilterInput(BaseFilterInput):
@@ -88,6 +118,10 @@ class Query(graphene.ObjectType):
     id_only_tag_lists = ModelListField(TagType, filter_input=IdFilterInput, sort_input=None)
     legacy_item_lists = ModelListField(LegacyItemType, filter_input=LegacyItemFilterInput)
     raw_book_lists = FilterConnectionField(BookType, enforce_first_or_last=True)
+    reviewed_book_lists = ModelListField(ReviewedBookType)
+    keyset_reviewed_book_lists = ModelListField(ReviewedBookType, pagination="keyset")
+    page_reviewed_book_lists = ModelListField(ReviewedBookType, pagination="page")
+    union_reviewed_book_lists = FilterConnectionField(ReviewedBookType)
     whoami = graphene.String()
     me = graphene.String()
     boom = graphene.String()
@@ -95,6 +129,11 @@ class Query(graphene.ObjectType):
     @staticmethod
     def resolve_active_book_lists(root, info, **kwargs):
         return Book.objects.filter(is_active=True)
+
+    @staticmethod
+    def resolve_union_reviewed_book_lists(root, info, **kwargs):
+        # prefetch_related() is not allowed on a combined (.union()) queryset.
+        return Book.objects.filter(rating__lt=3).union(Book.objects.filter(rating__gte=3))
 
     @staticmethod
     @jwt_required

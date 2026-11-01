@@ -19,6 +19,7 @@ from graphene_shield import pagination
 from graphene_shield.conf import shield_settings
 from graphene_shield.messages import CommonErrorMessages
 from graphene_shield.responses import EnhancedGraphQLError
+from graphene_shield.selection import collect_selected_fields, connection_node_selection
 
 try:
     from graphene_django_optimizer import OptimizedDjangoObjectType as _BaseObjectType
@@ -299,14 +300,52 @@ class FilterConnectionField(ConnectionField):
         connection.length = array_length
         return connection
 
-    def paginate(self, connection, args, iterable):
+    def rows_needed(self, connection_fields, info) -> bool:
+        """Does the selection read any row? ``totalCount`` alone doesn't."""
+        if self.pagination == "page":
+            page_info = collect_selected_fields(info, connection_fields.get("pageInfo", []))
+            return "items" in connection_fields or "hasNextPage" in page_info
+        return "edges" in connection_fields or "pageInfo" in connection_fields
+
+    def prefetch_for_selection(self, iterable, node_fields, info):
+        """Let the node type batch-load what the client selected on each row.
+
+        Calls ``NodeType.prefetch_for_selection(queryset, node_fields, info)`` when
+        the type defines it. Skipped for non-querysets and combined querysets
+        (``.union()`` etc.), which don't support ``prefetch_related``.
+        """
+        hook = getattr(self.node_type, "prefetch_for_selection", None)
+        if (
+            hook is None
+            or not node_fields
+            or not isinstance(iterable, QuerySet)
+            or iterable.query.combinator
+        ):
+            return iterable
+        return hook(iterable, node_fields, info)
+
+    def paginate(self, connection, args, iterable, info=None):
         iterable = pagination.ensure_ordered(maybe_queryset(iterable))
+        needs_rows = True
+        if info is not None:
+            connection_fields, node_fields = connection_node_selection(info)
+            needs_rows = self.rows_needed(connection_fields, info)
+            if needs_rows:
+                iterable = self.prefetch_for_selection(iterable, node_fields, info)
         if self.pagination == "page":
             return pagination.page_result(
-                iterable, args.get("page") or 1, args.get("page_size") or self.default_page_size
+                iterable,
+                args.get("page") or 1,
+                args.get("page_size") or self.default_page_size,
+                with_rows=needs_rows,
             )
         if self.pagination == "keyset":
+            if not needs_rows:
+                pagination.check_keyset_arguments(iterable, args)
+                return pagination.empty_connection(connection, iterable)
             return pagination.keyset_connection(connection, iterable, args, self.max_limit)
+        if not needs_rows:
+            return pagination.empty_connection(connection, iterable)
         return self.resolve_connection(connection, args, iterable, max_limit=self.max_limit)
 
     def connection_resolver(self, resolver, connection, root, info, **args):
@@ -319,7 +358,7 @@ class FilterConnectionField(ConnectionField):
         def finish(result):
             result = self.resolve_queryset(connection, result, info, args)
             result = self.process_iterable(result, info, args)
-            return self.paginate(connection, args, result)
+            return self.paginate(connection, args, result, info)
 
         if Promise is not None and Promise.is_thenable(iterable):
             return Promise.resolve(iterable).then(finish)
